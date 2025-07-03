@@ -1,96 +1,188 @@
 // No arquivo: lib/screens/module_screen.dart
 
 import 'package:flutter/material.dart';
-import 'package:vortex_demo/data/mock_data.dart';
-import 'package:vortex_demo/widgets/pill_content_renderer.dart';
+import 'package:vortex_demo/models/module_model.dart';
+import 'package:vortex_demo/services/firestore_service.dart';
+import 'package:vortex_demo/services/auth_service.dart';
+import 'package:vortex_demo/widgets/pill_renderer.dart';
+import 'package:vortex_demo/widgets/audio_player_widget.dart';
+import 'package:flutter/foundation.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 class ModuleScreen extends StatefulWidget {
-  final Day day; // Agora a tela recebe o objeto 'Day' inteiro
-
-  const ModuleScreen({super.key, required this.day});
+  final String moduleId;
+  const ModuleScreen({super.key, required this.moduleId});
 
   @override
   State<ModuleScreen> createState() => _ModuleScreenState();
 }
 
 class _ModuleScreenState extends State<ModuleScreen> {
-  // Função para exibir o conteúdo de uma pílula em um popup (modal)
-  void _showPillContent(Pill pill) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: Colors.grey[900],
-        title: Text(pill.title, style: const TextStyle(fontFamily: 'VT323', color: Colors.green)),
-        content: SizedBox(
-          width: double.maxFinite,
-          child: PillContentRenderer(contentBlocks: pill.contentBlocks),
-        ),
-        actions: [
-          // Se a pílula tiver uma tarefa, mostramos o botão de completar
-          if (pill.task != null)
-            TextButton(
-              onPressed: () {
-                _completePill(pill.pillNumber);
-                Navigator.of(context).pop(); // Fecha o popup
-              },
-              child: const Text('// TAREFA CONCLUÍDA //', style: TextStyle(fontFamily: 'VT323', color: Colors.amber)),
-            )
-          else // Se não tiver tarefa, é só um botão para fechar
-            TextButton(
-              onPressed: () {
-                _completePill(pill.pillNumber); // Marcamos como concluída mesmo assim
-                Navigator.of(context).pop();
-              },
-              child: const Text('// ENTENDIDO //', style: TextStyle(fontFamily: 'VT323', color: Colors.green)),
-            ),
-        ],
-      ),
-    );
+  final FirestoreService _firestoreService = FirestoreService();
+  final AuthService _authService = AuthService();
+  
+  late Future<(Module, UserProgress?)> _dataFuture;
+  User? _currentUser;
+
+  @override
+  void initState() {
+    super.initState();
+    _currentUser = _authService.currentUser;
+    _dataFuture = _loadModuleData();
   }
 
-  // A lógica de gamificação das pílulas
-  void _completePill(int pillNumber) {
-    setState(() {
-      final completedPillIndex = widget.day.pills.indexWhere((p) => p.pillNumber == pillNumber);
-      if (completedPillIndex != -1) {
-        widget.day.pills[completedPillIndex].status = 'completed';
-      }
+  Future<(Module, UserProgress?)> _loadModuleData() async {
+    if (_currentUser == null) {
+      throw Exception("Usuário não autenticado para carregar o módulo.");
+    }
+    final module = await _firestoreService.getModuleById(widget.moduleId);
+    final userProgress = await _firestoreService.getUserProgress(_currentUser!.uid);
+    return (module, userProgress);
+  }
 
-      final nextPillIndex = completedPillIndex + 1;
-      if (nextPillIndex < widget.day.pills.length) {
-        widget.day.pills[nextPillIndex].status = 'unlocked';
+  Future<void> _completePill(String pillId) async {
+    if (_currentUser == null) return;
+
+    await _firestoreService.updatePillCompletion(_currentUser!.uid, widget.moduleId, pillId);
+    
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          backgroundColor: Colors.green[700],
+          content: Text('Checkpoint $pillId alcançado!', style: const TextStyle(fontFamily: 'VT323')),
+        )
+      );
+      
+      // --- DIAGNÓSTICO AVANÇADO ---
+      // Verificamos a conclusão do dia ANTES de recarregar os dados.
+      await _checkDayCompletion();
+
+      // Força a reconstrução da tela para refletir o novo progresso.
+      setState(() {
+        _dataFuture = _loadModuleData();
+      });
+    }
+  }
+
+  Future<void> _checkDayCompletion() async {
+    if (_currentUser == null) return;
+
+    // Usamos os dados já carregados para a verificação.
+    final (module, userProgress) = await _dataFuture;
+    final dayProgress = userProgress?.progress[widget.moduleId];
+
+    if (dayProgress != null) {
+      // --- LOGS DE DIAGNÓSTICO ---
+      // Pega a lista de IDs de todas as pílulas do módulo.
+      final allPillIdsInModule = module.contentPills.map((p) => p.pillId).toSet();
+      // Pega a lista de IDs das pílulas que o usuário já completou.
+      final completedPillIds = dayProgress.completedPills.toSet();
+
+      debugPrint("--- VERIFICANDO CONCLUSÃO DO DIA ${widget.moduleId} ---");
+      debugPrint("Pílulas necessárias para completar: ${allPillIdsInModule.toList()}");
+      debugPrint("Pílulas já completadas pelo usuário: ${completedPillIds.toList()}");
+
+      // A lógica de conclusão agora é: o conjunto de pílulas concluídas contém
+      // todas as pílulas necessárias?
+      final allPillsCompleted = completedPillIds.containsAll(allPillIdsInModule);
+      
+      debugPrint("Todas as pílulas foram concluídas? $allPillsCompleted");
+      // --- FIM DOS LOGS DE DIAGNÓSTICO ---
+
+      if (allPillsCompleted) {
+        debugPrint("CONFIRMADO: Todas as pílulas do ${widget.moduleId} concluídas!");
+        await _firestoreService.updateDayStatus(_currentUser!.uid, widget.moduleId, 'completed');
+        
+        final nextDayNumber = module.dayNumber + 1;
+        if (nextDayNumber <= 10) {
+          final nextDayId = 'dia-${nextDayNumber.toString().padLeft(2, '0')}';
+          await _firestoreService.updateDayStatus(_currentUser!.uid, nextDayId, 'unlocked');
+          debugPrint("Dia $nextDayId desbloqueado!");
+        }
+
+        if (mounted) {
+          showDialog(
+            context: context,
+            builder: (context) => AlertDialog(
+              backgroundColor: Colors.black,
+              shape: RoundedRectangleBorder(side: BorderSide(color: Colors.green[400]!)),
+              title: Text('// MISSÃO ${module.dayNumber} CONCLUÍDA //', style: TextStyle(fontFamily: 'VT323', color: Colors.green)),
+              content: Text('Você completou todos os objetivos do dia. O próximo módulo foi desbloqueado. Descanse, operador.', style: TextStyle(color: Colors.white)),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('// ENTENDIDO //', style: TextStyle(fontFamily: 'VT323', color: Colors.green)),
+                ),
+              ],
+            ),
+          );
+        }
       }
-    });
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    // O resto do seu build method permanece o mesmo
     return Scaffold(
       backgroundColor: Colors.black,
-      appBar: AppBar(
-        backgroundColor: Colors.black,
-        iconTheme: const IconThemeData(color: Colors.green),
-        title: Text('// ${widget.day.title.toUpperCase()} //', style: const TextStyle(fontFamily: 'VT323', color: Colors.green, fontSize: 24)),
-      ),
-      body: ListView.builder(
-        itemCount: widget.day.pills.length,
-        itemBuilder: (context, index) {
-          final pill = widget.day.pills[index];
-          final isLocked = pill.status == 'locked';
-          final isCompleted = pill.status == 'completed';
+      body: FutureBuilder<(Module, UserProgress?)>(
+        future: _dataFuture,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return Center(child: CircularProgressIndicator(color: Colors.green[400]));
+          }
+          if (snapshot.hasError) {
+            return Center(child: Text('Erro ao carregar módulo: ${snapshot.error}', style: const TextStyle(color: Colors.red)));
+          }
+          if (!snapshot.hasData) {
+            return const Center(child: Text('Módulo não encontrado.', style: TextStyle(color: Colors.white)));
+          }
 
-          Color color = isLocked ? Colors.grey[700]! : (isCompleted ? Colors.blueAccent : Colors.green);
+          final (module, userProgress) = snapshot.data!;
+          final dayProgress = userProgress?.progress[widget.moduleId];
 
-          return Card(
-            color: Colors.black,
-            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            shape: RoundedRectangleBorder(side: BorderSide(color: color, width: 2)),
-            child: ListTile(
-              onTap: isLocked ? null : () => _showPillContent(pill),
-              leading: Icon(isLocked ? Icons.lock : (isCompleted ? Icons.check_circle : Icons.play_arrow), color: color),
-              title: Text(pill.title, style: TextStyle(fontFamily: 'VT323', fontSize: 20, color: isLocked ? Colors.grey[600] : Colors.white)),
-              subtitle: Text(pill.estimatedTime, style: TextStyle(fontFamily: 'VT323', color: color)),
-            ),
+          return CustomScrollView(
+            slivers: [
+              SliverAppBar(
+                backgroundColor: Colors.black,
+                iconTheme: const IconThemeData(color: Colors.green),
+                title: Text('// ${module.title.toUpperCase()} //', style: const TextStyle(fontFamily: 'VT323', color: Colors.green, fontSize: 24)),
+                floating: true,
+              ),
+              SliverToBoxAdapter(
+                child: AudioPlayerWidget(audioUrl: module.audioSummaryUrl),
+              ),
+              SliverList(
+                delegate: SliverChildBuilderDelegate(
+                  (context, index) {
+                    final pill = module.contentPills[index];
+                    
+                    final bool isPillCompleted = dayProgress?.completedPills.contains(pill.pillId) ?? false;
+                    
+                    bool isPillUnlocked = false;
+                    if (index == 0) {
+                      isPillUnlocked = true;
+                    } else {
+                      final previousPill = module.contentPills[index - 1];
+                      isPillUnlocked = dayProgress?.completedPills.contains(previousPill.pillId) ?? false;
+                    }
+                    
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+                      child: PillRenderer(
+                        pill: pill,
+                        pillContent: pill.content,
+                        onValidationSuccess: () => _completePill(pill.pillId),
+                        isCompleted: isPillCompleted,
+                        isUnlocked: isPillUnlocked,
+                      ),
+                    );
+                  },
+                  childCount: module.contentPills.length,
+                ),
+              ),
+            ],
           );
         },
       ),

@@ -31,8 +31,14 @@
 
   <title>vortex_demo</title>
   <link rel="manifest" href="manifest.json">
+
+  <!-- ADIÇÃO CRÍTICA: Biblioteca da Plataforma Google Sign-In -->
+  <!-- Esta linha é essencial para que o GoogleSignIn funcione na web. -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+
 </head>
 <body>
+  <!-- Este script carrega a sua aplicação Flutter. -->
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>
